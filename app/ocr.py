@@ -1,63 +1,70 @@
-import pytesseract
+import easyocr
 import cv2
 import numpy as np
 import re
 
-# --- Fungsi preprocessing gambar ---
+# Inisialisasi reader secara global agar tidak boros memory/waktu
+# 'id' untuk Bahasa Indonesia, 'en' untuk English
+reader = easyocr.Reader(['id', 'en'], gpu=False) 
+
 def preprocess_image(img):
+    """
+    Untuk EasyOCR, grayscale dan sedikit denoising sudah cukup membantu.
+    """
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # Adaptive threshold lebih fleksibel
-    thresh = cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                   cv2.THRESH_BINARY, 31, 9)
-    # Hilangkan noise
-    blur = cv2.medianBlur(thresh, 3)
-    return blur
+    # Menghilangkan noise tipis
+    denoised = cv2.fastNlMeansDenoising(gray, h=10)
+    return denoised
 
-# --- Ekstraksi total dari teks OCR ---
-def extract_total_from_text(text: str):
-    # Regex dengan variasi ejaan 'Total'
-    patterns = [
-        r"(?:Total|Totel|Totol|Tota1|Grand\s*Total|Jumlah\s*Bayar|Amount)[:\s]*Rp?[\s]*([\d.,]+)",
-        r"Sub\s*total[:\s]*Rp?[\s]*([\d.,]+)"
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, text, flags=re.IGNORECASE)
-        if match:
-            raw_number = match.group(1)
-            cleaned = raw_number.replace(".", "").replace(",", "")
-            return cleaned
-
-    # --- Fallback ---
-    # Ambil angka terbesar tapi filter hanya angka < 8 digit (biar ga keambil nomor HP)
-    all_numbers = re.findall(r"[\d.,]+", text)
+def extract_total_from_text(results):
+    """
+    results: output dari reader.readtext() berupa list of tuples
+    """
+    full_text = " ".join([res[1] for res in results]).upper()
+    
+    # List untuk menampung semua angka yang ditemukan
     candidates = []
-    for num in all_numbers:
-        n = num.replace(".", "").replace(",", "")
-        try:
-            val = int(n)
-            if 1000 <= val <= 99999999:  # filter nominal realistis
-                candidates.append(val)
-        except:
-            continue
 
-    if candidates:
-        return str(max(candidates))
+    # 1. Cari berdasarkan keyword 'TOTAL' atau 'JUMLAH'
+    for i, res in enumerate(results):
+        text = res[1].upper()
+        if any(key in text for key in ["TOTAL", "GRAND", "JUMLAH", "AMOUNT", "BAYAR"]):
+            # Cari angka di sekitar keyword (baris yang sama atau 2 baris setelahnya)
+            for j in range(i, min(i + 3, len(results))):
+                sub_text = results[j][1]
+                # Regex ambil angka saja
+                num_str = re.sub(r"[^\d]", "", sub_text)
+                if num_str and 3 < len(num_str) < 9: # Nominal ribuan - puluhan juta
+                    return int(num_str)
 
-    return None
+    # 2. Fallback: Ambil angka terbesar (biasanya total ada di bawah dan paling besar)
+    for res in results:
+        num_str = re.sub(r"[^\d]", "", res[1])
+        if num_str and 3 < len(num_str) < 9:
+            candidates.append(int(num_str))
 
-# --- Fungsi utama ---
+    return max(candidates) if candidates else None
+
 async def extract_text_and_total(file):
     image_bytes = await file.read()
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
+    # Preprocessing ringan
     processed = preprocess_image(img)
-    config = "--oem 3 --psm 6"
-    text = pytesseract.image_to_string(processed, lang="eng", config=config)
 
-    total = extract_total_from_text(text)
+    # EasyOCR membaca teks
+    # detail=1 memberikan koordinat dan confidence level
+    results = reader.readtext(processed)
+
+    # Gabungkan semua teks untuk raw_text
+    raw_text = "\n".join([res[1] for res in results])
+    
+    # Ambil nominal total
+    total = extract_total_from_text(results)
+
     return {
-        "raw_text": text,
-        "total": total
+        "raw_text": raw_text,
+        "total": total,
+        "status": "success"
     }
