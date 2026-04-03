@@ -3,65 +3,53 @@ import cv2
 import numpy as np
 import re
 
-# Inisialisasi reader secara global agar tidak boros memory/waktu
-# 'id' untuk Bahasa Indonesia, 'en' untuk English
-reader = easyocr.Reader(['id', 'en'], gpu=False) 
+# Inisialisasi reader
+reader = easyocr.Reader(['id', 'en'], gpu=False)
 
 def preprocess_image(img):
-    """
-    Untuk EasyOCR, grayscale dan sedikit denoising sudah cukup membantu.
-    """
+    # Grayscale sederhana untuk meningkatkan akurasi OCR
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    # Menghilangkan noise tipis
-    denoised = cv2.fastNlMeansDenoising(gray, h=10)
-    return denoised
+    return gray
 
-def extract_total_from_text(results):
+def extract_total_from_text(raw_text):
     """
-    results: output dari reader.readtext() berupa list of tuples
+    Strategi Baru: Cari angka terakhir yang muncul setelah kata kunci penting.
     """
-    full_text = " ".join([res[1] for res in results]).upper()
+    # 1. Bersihkan text agar menjadi satu baris panjang
+    clean_content = raw_text.replace('\n', ' ').upper()
     
-    # List untuk menampung semua angka yang ditemukan
-    candidates = []
+    # 2. Cari semua angka yang polanya seperti nominal uang (4-7 digit)
+    all_amounts = re.findall(r"(?:RP|IDR)?[\s\.]*([\d\.,]+)", clean_content)
+    
+    valid_numbers = []
+    for amt in all_amounts:
+        # Menghilangkan titik dan koma
+        num_only = re.sub(r"[.,\s]", "", amt)
+        if 4 <= len(num_only) <= 7: 
+            valid_numbers.append(int(num_only))
 
-    # 1. Cari berdasarkan keyword 'TOTAL' atau 'JUMLAH'
-    for i, res in enumerate(results):
-        text = res[1].upper()
-        if any(key in text for key in ["TOTAL", "GRAND", "JUMLAH", "AMOUNT", "BAYAR"]):
-            # Cari angka di sekitar keyword (baris yang sama atau 2 baris setelahnya)
-            for j in range(i, min(i + 3, len(results))):
-                sub_text = results[j][1]
-                # Regex ambil angka saja
-                num_str = re.sub(r"[^\d]", "", sub_text)
-                if num_str and 3 < len(num_str) < 9: # Nominal ribuan - puluhan juta
-                    return int(num_str)
+    # 3. Ambil angka terakhir yang valid sebagai total
+    if valid_numbers:
+        return valid_numbers[-1]
 
-    # 2. Fallback: Ambil angka terbesar (biasanya total ada di bawah dan paling besar)
-    for res in results:
-        num_str = re.sub(r"[^\d]", "", res[1])
-        if num_str and 3 < len(num_str) < 9:
-            candidates.append(int(num_str))
-
-    return max(candidates) if candidates else None
+    return None
 
 async def extract_text_and_total(file):
     image_bytes = await file.read()
     nparr = np.frombuffer(image_bytes, np.uint8)
     img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
 
-    # Preprocessing ringan
     processed = preprocess_image(img)
 
-    # EasyOCR membaca teks
-    # detail=1 memberikan koordinat dan confidence level
-    results = reader.readtext(processed)
+    # Jalankan OCR
+    results = reader.readtext(processed, paragraph=True)
 
-    # Gabungkan semua teks untuk raw_text
-    raw_text = "\n".join([res[1] for res in results])
+    # Mengambil teks mentah dari hasil OCR
+    full_text_list = [res[1] for res in results]
+    raw_text = "\n".join(full_text_list)
     
-    # Ambil nominal total
-    total = extract_total_from_text(results)
+    # Ekstrak total dari teks yang sudah diproses
+    total = extract_total_from_text(raw_text)
 
     return {
         "raw_text": raw_text,
